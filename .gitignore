@@ -1,0 +1,12 @@
+.DS_Store
+.vscode/*
+
+instructions.md
+slides.pdf
+
+# Demo runtime artifacts
+.run-id
+backups/*
+!backups/.gitkeep
+evidence/*
+!evidence/.gitkeep

@@ -1,0 +1,165 @@
+# ELR vs. non-ELR demo cluster
+#
+#   - 3 dedicated KRaft controllers (3-voter quorum)      controller-1..3
+#   - 3 brokers, labelled A, B and C                       kafka-a, kafka-b, kafka-c
+#   - a "tools" container that runs every Kafka CLI command and mounts the
+#     three broker data volumes, so we can inspect (and, deliberately, damage)
+#     a broker's log even while that broker is stopped
+#
+# Why dedicated controllers and not broker,controller combined mode?
+# The fault sequence stops 2 of the 3 brokers. In combined mode that would
+# also stop 2 of the 3 controller voters, the quorum would be lost, and no ISR
+# shrink or leader election could ever be committed. Keeping the quorum on
+# separate containers lets brokers fail without taking the metadata layer down.
+#
+# Disposable local lab only. Not a production template.
+
+x-controller-env: &controller-env
+  KAFKA_PROCESS_ROLES: 'controller'
+  KAFKA_CONTROLLER_QUORUM_VOTERS: '101@controller-1:9093,102@controller-2:9093,103@controller-3:9093'
+  KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT'
+  CLUSTER_ID: '${CLUSTER_ID}'
+  KAFKA_HEAP_OPTS: '-Xms256m -Xmx512m'
+  KAFKA_CONFLUENT_TELEMETRY_REMOTECONFIG_CONFLUENT_ENABLED: 'false'
+
+x-broker-env: &broker-env
+  KAFKA_PROCESS_ROLES: 'broker'
+  KAFKA_CONTROLLER_QUORUM_VOTERS: '101@controller-1:9093,102@controller-2:9093,103@controller-3:9093'
+  KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT'
+  KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+  CLUSTER_ID: '${CLUSTER_ID}'
+  KAFKA_HEAP_OPTS: '-Xms512m -Xmx768m'
+  KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+
+  # Internal topics: RF=3 like the demo topic.
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+  KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_CONFLUENT_METADATA_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_CONFLUENT_COMMAND_TOPIC_REPLICATION_FACTOR: 3
+
+  # Keep the partition layout stable so every run starts from the same state:
+  # no self-balancing, no automatic move of leadership back to the preferred replica.
+  KAFKA_CONFLUENT_BALANCER_ENABLE: 'false'
+  KAFKA_AUTO_LEADER_REBALANCE_ENABLE: 'false'
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+
+  KAFKA_CONFLUENT_TELEMETRY_REMOTECONFIG_CONFLUENT_ENABLED: 'false'
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # KRaft controller quorum (3 voters)
+  # ---------------------------------------------------------------------------
+  controller-1:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: controller-1
+    container_name: controller-1
+    environment:
+      <<: *controller-env
+      KAFKA_NODE_ID: 101
+      KAFKA_LISTENERS: 'CONTROLLER://controller-1:9093'
+    volumes:
+      - controller-1-data:/var/lib/kafka/data
+
+  controller-2:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: controller-2
+    container_name: controller-2
+    environment:
+      <<: *controller-env
+      KAFKA_NODE_ID: 102
+      KAFKA_LISTENERS: 'CONTROLLER://controller-2:9093'
+    volumes:
+      - controller-2-data:/var/lib/kafka/data
+
+  controller-3:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: controller-3
+    container_name: controller-3
+    environment:
+      <<: *controller-env
+      KAFKA_NODE_ID: 103
+      KAFKA_LISTENERS: 'CONTROLLER://controller-3:9093'
+    volumes:
+      - controller-3-data:/var/lib/kafka/data
+
+  # ---------------------------------------------------------------------------
+  # Brokers A, B, C  (node ids 1, 2, 3)
+  # ---------------------------------------------------------------------------
+  kafka-a:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: kafka-a
+    container_name: kafka-a
+    depends_on: [controller-1, controller-2, controller-3]
+    ports:
+      - "19091:19091"   # EXTERNAL listener for host clients
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: 'INTERNAL://kafka-a:29092,EXTERNAL://0.0.0.0:19091'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka-a:29092,EXTERNAL://localhost:19091'
+    volumes:
+      - kafka-a-data:/var/lib/kafka/data
+
+  kafka-b:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: kafka-b
+    container_name: kafka-b
+    depends_on: [controller-1, controller-2, controller-3]
+    ports:
+      - "19092:19092"
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: 'INTERNAL://kafka-b:29092,EXTERNAL://0.0.0.0:19092'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka-b:29092,EXTERNAL://localhost:19092'
+    volumes:
+      - kafka-b-data:/var/lib/kafka/data
+
+  kafka-c:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: kafka-c
+    container_name: kafka-c
+    depends_on: [controller-1, controller-2, controller-3]
+    ports:
+      - "19093:19093"
+    environment:
+      <<: *broker-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: 'INTERNAL://kafka-c:29092,EXTERNAL://0.0.0.0:19093'
+      KAFKA_ADVERTISED_LISTENERS: 'INTERNAL://kafka-c:29092,EXTERNAL://localhost:19093'
+    volumes:
+      - kafka-c-data:/var/lib/kafka/data
+
+  # ---------------------------------------------------------------------------
+  # Tools: runs all CLI commands; never stopped during the demo.
+  # Broker data volumes are mounted at /data/a, /data/b, /data/c.
+  # ---------------------------------------------------------------------------
+  tools:
+    image: confluentinc/cp-server:${CP_VERSION}
+    hostname: tools
+    container_name: tools
+    entrypoint: ["sleep", "infinity"]
+    # Start after the brokers so the broker containers initialise the volumes.
+    depends_on: [kafka-a, kafka-b, kafka-c]
+    environment:
+      KAFKA_HEAP_OPTS: '-Xms64m -Xmx256m'
+    volumes:
+      - kafka-a-data:/data/a
+      - kafka-b-data:/data/b
+      - kafka-c-data:/data/c
+      - ./backups:/backups
+
+volumes:
+  controller-1-data:
+  controller-2-data:
+  controller-3-data:
+  kafka-a-data:
+  kafka-b-data:
+  kafka-c-data:
